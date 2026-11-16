@@ -449,13 +449,14 @@ struct BlueprintCanvas: View {
     var viewport = CGRect(origin: Blueprint.origin, size: Blueprint.size)
     @Environment(\.displayScale) private var displayScale
 
-    /// Smallest legible text on screen, in points: non-Retina pixels need bigger glyphs.
-    static func minTextPoints(displayScale: CGFloat) -> CGFloat { displayScale >= 2 ? 7.5 : 9.5 }
+    /// Smallest legible text on screen, in points (SF Pro Condensed): non-Retina pixels need bigger glyphs.
+    static func minTextPoints(displayScale: CGFloat) -> CGFloat { displayScale >= 2 ? 7.5 : 9 }
 
     var body: some View {
         let s = scale
         let minText = Self.minTextPoints(displayScale: displayScale) / s
-        let px = 1 / (s * max(displayScale, 1))
+        let ds = max(displayScale, 1)
+        let px = 1 / (s * ds)
         let info = makeInfo()
         let style = BlueprintStyle()
         let sel = selection, bk = bank, vp = viewport
@@ -463,7 +464,7 @@ struct BlueprintCanvas: View {
             Canvas { ctx, _ in
                 ctx.scaleBy(x: s, y: s)
                 ctx.translateBy(x: -vp.minX, y: -vp.minY)
-                BlueprintPainter(ctx: ctx, st: style, info: info, sel: sel, bank: bk, minText: minText, px: px).paint()
+                BlueprintPainter(ctx: ctx, st: style, info: info, sel: sel, bank: bk, minText: minText, px: px, scale: s, displayScale: ds).paint()
             }
             .frame(width: vp.width * s, height: vp.height * s)
             ForEach(Blueprint.controls.filter { vp.intersects($0.rect) }, id: \.id) { hw in hitArea(hw, s: s, info: info) }
@@ -558,6 +559,9 @@ private struct BlueprintPainter {
     /// Smallest text size and one device pixel, in drawing units.
     var minText: CGFloat = 0
     var px: CGFloat = 0
+    /// Points per drawing unit, and device pixels per point.
+    var scale: CGFloat = 1
+    var displayScale: CGFloat = 2
 
     let hair: CGFloat = 0.45
     let line: CGFloat = 0.7
@@ -581,26 +585,47 @@ private struct BlueprintPainter {
     func text(_ s: String, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ c: Color? = nil,
               weight: Font.Weight = .regular, anchor: UnitPoint = .center, mono: Bool = false, maxWidth: CGFloat? = nil, optional: Bool = false) {
         guard !s.isEmpty, !(optional && skipOptional(size)) else { return }
-        ctx.draw(fitted(s, size, c, weight: weight, mono: mono, maxWidth: maxWidth), at: CGPoint(x: x, y: y), anchor: anchor)
+        let r = fitted(s, size, c, weight: weight, mono: mono, maxWidth: maxWidth)
+        // Lay the text out in screen points with its left edge and baseline on whole device pixels, so small
+        // glyphs are not smeared across pixel boundaries by the drawing's fractional scale.
+        let p = CGPoint(x: x, y: y).applying(ctx.transform)
+        let big = CGSize(width: 10_000, height: 1_000)
+        let sz = r.measure(in: big), base = r.firstBaseline(in: big)
+        func snap(_ v: CGFloat) -> CGFloat { (v * displayScale).rounded() / displayScale }
+        let left = snap(p.x - anchor.x * sz.width)
+        let top = snap(p.y - anchor.y * sz.height + base) - base
+        var dc = ctx
+        dc.transform = .identity
+        dc.draw(r, at: CGPoint(x: left, y: top), anchor: .topLeading)
     }
 
     /// Secondary captions are left out when they would have to grow a lot to be legible (small drawing on a
     /// non-Retina screen): enlarged, they would collide with the controls around them.
     func skipOptional(_ size: CGFloat) -> Bool { minText > size * 2 }
 
-    /// Text at `size`, raised to the legible minimum, and cut with "…" when wider than `maxWidth`
-    /// (the room a control's label has before it runs into the next control).
+    /// Text at `size` (drawing units), raised to the legible minimum, and cut with "…" when wider than
+    /// `maxWidth` (the room a control's label has before it runs into the next control). The result is
+    /// resolved in screen points, for drawing with an identity transform.
+    /// SF Pro Condensed: narrow enough for the cramped labels, and still clear at 9 px on a 1x screen.
     func fitted(_ s: String, _ size: CGFloat, _ c: Color? = nil, weight: Font.Weight = .regular,
                 mono: Bool = false, maxWidth: CGFloat? = nil) -> GraphicsContext.ResolvedText {
+        let enlarged = minText > size
+        // Thin strokes vanish on a 1x screen; give regular captions a bit more weight there.
+        // Bold condensed glyphs clog up at 9 px, so use semibold for values there.
+        let w = displayScale >= 2 ? weight : weight == .regular ? .medium : weight == .bold ? .semibold : weight
         func make(_ str: String, _ sz: CGFloat) -> GraphicsContext.ResolvedText {
-            ctx.resolve(Text(str).font(.system(size: sz, weight: weight, design: mono ? .monospaced : .default))
-                .foregroundColor(c ?? st.ink))
+            let f: Font = mono ? .system(size: sz, weight: w, design: .monospaced) : .system(size: sz, weight: w).width(.condensed)
+            return ctx.resolve(Text(str).font(f).foregroundColor(c ?? st.ink))
         }
-        let eff = max(size, minText)
+        let eff = (enlarged ? minText : size) * scale
         let big = CGSize(width: 10_000, height: 1_000)
-        guard eff > size || maxWidth != nil else { return make(s, size) }
-        guard let limit = maxWidth else { return make(s, eff) }
+        guard let limit = maxWidth.map({ $0 * scale }) else { return make(s, eff) }
         var r = make(s, eff)
+        // "CC 52" → "52" before cutting: the number is the part that matters, and the CC type is in the tooltip.
+        if r.measure(in: big).width > limit, s.hasPrefix("CC "), s.count > 3 {
+            let short = make(String(s.dropFirst(3)), eff)
+            if short.measure(in: big).width <= limit { return short }
+        }
         var keep = s.count
         while r.measure(in: big).width > limit && keep > 1 {
             keep -= 1
@@ -620,6 +645,10 @@ private struct BlueprintPainter {
         let d = Blueprint.controls.filter { $0.id != hw.id && $0.kind != .keys && $0.kind != .block && abs($0.rect.midY - r.midY) < 6 }
             .map { abs($0.rect.midX - r.midX) }.min() ?? 60
         return min(max(d - 1.5, r.width), 60)
+    }
+    var dawCompact: Bool {
+        let narrowest = Blueprint.controls.filter { $0.group == "daw" }.map(room).min() ?? 60
+        return fitted("CC 00", 4.2, weight: .bold).measure(in: CGSize(width: 1_000, height: 100)).width > narrowest * scale
     }
     func short(_ s: String, _ n: Int) -> String { s.count > n ? String(s.prefix(n - 1)) + "…" : s }
 
@@ -697,10 +726,13 @@ private struct BlueprintPainter {
         hline(661, 818, 563.5, st.faint)
         let shortcuts: [(String, CGFloat)] = [("Global", 664), ("Store", 690), ("Velo Curve", 705), ("Name", 719), ("Mode", 732),
                                               ("Option", 747), ("MIDI Ch", 761), ("CC", 772), ("Min LSB", 787), ("Max MSB", 807)]
-        for (i, (t, x)) in shortcuts.enumerated() {
-            let gaps = [i > 0 ? x - shortcuts[i - 1].1 : 30, i < shortcuts.count - 1 ? shortcuts[i + 1].1 - x : 30]
-            text(t, x, 567.5, 3.0, st.faint, maxWidth: gaps.min()! - 1, optional: true)
+        // All or nothing: a row with some names missing or cut off is just noise.
+        let allFit = shortcuts.indices.allSatisfy { i in
+            let x = shortcuts[i].1
+            let gap = min(i > 0 ? x - shortcuts[i - 1].1 : 30, i < shortcuts.count - 1 ? shortcuts[i + 1].1 - x : 30)
+            return fitted(shortcuts[i].0, 3.0).measure(in: CGSize(width: 1_000, height: 100)).width < (gap - 1) * scale
         }
+        if allFit { for (t, x) in shortcuts { text(t, x, 567.5, 3.0, st.faint, optional: true) } }
         if let s = info.split, (21...108).contains(s) {
             let white = (21..<s).filter { !isBlack($0) }.count
             let sx = x0 + CGFloat(white) * w - (isBlack(s) ? w * 0.29 : 0)
@@ -772,7 +804,8 @@ private struct BlueprintPainter {
         text("Live", 530, 514.3, 3.2, st.faint, maxWidth: 26, optional: true); text("Bank \(bank)", 530, 528, 3.8, st.data, weight: .bold)
         // Grouping rules under the encoder labels (1-4, 5-8)
         hline(549, 646, 478.4, st.faint); hline(659, 757, 478.4, st.faint)
-        text("BANK \(bank)", 546, 449, 4, st.faint, weight: .bold, anchor: .trailing, optional: true)
+        // Collides with the enlarged encoder names; the bank also shows under the Live button.
+        if minText <= 4 { text("BANK \(bank)", 546, 449, 4, st.faint, weight: .bold, anchor: .trailing) }
     }
 
     func paintControl(_ hw: HWControl) {
@@ -807,7 +840,9 @@ private struct BlueprintPainter {
             text(a.value, r.midX, 535, 4.6, st.data, weight: .bold, maxWidth: room(hw))
             if !a.name.isEmpty && !skipOptional(3.2) {
                 var c = ctx
-                c.translateBy(x: r.midX + 4.4, y: 500)
+                c.transform = .identity
+                let o = CGPoint(x: r.midX + 4.4, y: 500).applying(ctx.transform)
+                c.translateBy(x: o.x, y: o.y)
                 c.rotate(by: .degrees(-90))
                 c.draw(fitted(short(a.name, 14), 3.2, st.faint, maxWidth: 40), at: .zero, anchor: .center)
             }
@@ -817,8 +852,11 @@ private struct BlueprintPainter {
             if hw.group == "columns" {
                 text(a.value, r.midX, 553, 4.2, st.data, weight: .bold, maxWidth: room(hw))
             } else if hw.group == "daw" {
-                text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.2, st.faint, maxWidth: room(hw), optional: true)
-                text(a.value, r.midX, r.maxY + 8.2, 4.2, st.data, weight: .bold, maxWidth: room(hw))
+                // Name and value are 4.6 units apart: the name only fits above the value while text stays small.
+                if minText < 4.4 { text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.2, st.faint, maxWidth: room(hw)) }
+                // Same form for the whole row: drop "CC " from all values once "CC 00" no longer fits.
+                let v = dawCompact && a.value.hasPrefix("CC ") ? String(a.value.dropFirst(3)) : a.value
+                text(v, r.midX, r.maxY + 8.2, 4.2, st.data, weight: .bold, maxWidth: room(hw))
             } else {
                 text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.4, st.faint, maxWidth: room(hw))
             }
