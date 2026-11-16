@@ -14,6 +14,8 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/KeyLabManager" "$APP/Contents/MacOS/KeyLabManager"
 cp Sources/KeyLabCore/Resources/kl2-schema.json "$APP/Contents/Resources/"
+[[ -f Resources/AppIcon.icns ]] || swift tools/make-icon.swift
+cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp "$BIN/klctl" dist/klctl
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -25,6 +27,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>CFBundleDisplayName</key><string>KeyLab Manager</string>
   <key>CFBundleIdentifier</key><string>local.keylab-manager</string>
   <key>CFBundleExecutable</key><string>KeyLabManager</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>

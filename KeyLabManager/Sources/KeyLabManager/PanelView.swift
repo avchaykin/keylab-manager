@@ -447,9 +447,15 @@ struct BlueprintCanvas: View {
     @Binding var bank: Int
     let scale: CGFloat
     var viewport = CGRect(origin: Blueprint.origin, size: Blueprint.size)
+    @Environment(\.displayScale) private var displayScale
+
+    /// Smallest legible text on screen, in points: non-Retina pixels need bigger glyphs.
+    static func minTextPoints(displayScale: CGFloat) -> CGFloat { displayScale >= 2 ? 7.5 : 9.5 }
 
     var body: some View {
         let s = scale
+        let minText = Self.minTextPoints(displayScale: displayScale) / s
+        let px = 1 / (s * max(displayScale, 1))
         let info = makeInfo()
         let style = BlueprintStyle()
         let sel = selection, bk = bank, vp = viewport
@@ -457,7 +463,7 @@ struct BlueprintCanvas: View {
             Canvas { ctx, _ in
                 ctx.scaleBy(x: s, y: s)
                 ctx.translateBy(x: -vp.minX, y: -vp.minY)
-                BlueprintPainter(ctx: ctx, st: style, info: info, sel: sel, bank: bk).paint()
+                BlueprintPainter(ctx: ctx, st: style, info: info, sel: sel, bank: bk, minText: minText, px: px).paint()
             }
             .frame(width: vp.width * s, height: vp.height * s)
             ForEach(Blueprint.controls.filter { vp.intersects($0.rect) }, id: \.id) { hw in hitArea(hw, s: s, info: info) }
@@ -549,6 +555,9 @@ private struct BlueprintPainter {
     let info: Info
     let sel: PanelSelection
     let bank: Int
+    /// Smallest text size and one device pixel, in drawing units.
+    var minText: CGFloat = 0
+    var px: CGFloat = 0
 
     let hair: CGFloat = 0.45
     let line: CGFloat = 0.7
@@ -564,20 +573,53 @@ private struct BlueprintPainter {
     }
 
     // Helpers
-    func stroke(_ p: Path, _ c: Color? = nil, _ w: CGFloat? = nil) { ctx.stroke(p, with: .color(c ?? st.ink), lineWidth: w ?? line) }
+    func stroke(_ p: Path, _ c: Color? = nil, _ w: CGFloat? = nil) {
+        ctx.stroke(p, with: .color(c ?? st.ink), lineWidth: max(w ?? line, px))
+    }
     func fill(_ p: Path, _ c: Color) { ctx.fill(p, with: .color(c)) }
     func rect(_ r: CGRect, _ corner: CGFloat = 1) -> Path { Path(roundedRect: r, cornerRadius: corner) }
     func text(_ s: String, _ x: CGFloat, _ y: CGFloat, _ size: CGFloat, _ c: Color? = nil,
-              weight: Font.Weight = .regular, anchor: UnitPoint = .center, mono: Bool = false) {
-        guard !s.isEmpty else { return }
-        let t = Text(s).font(.system(size: size, weight: weight, design: mono ? .monospaced : .default)).foregroundColor(c ?? st.ink)
-        ctx.draw(t, at: CGPoint(x: x, y: y), anchor: anchor)
+              weight: Font.Weight = .regular, anchor: UnitPoint = .center, mono: Bool = false, maxWidth: CGFloat? = nil, optional: Bool = false) {
+        guard !s.isEmpty, !(optional && skipOptional(size)) else { return }
+        ctx.draw(fitted(s, size, c, weight: weight, mono: mono, maxWidth: maxWidth), at: CGPoint(x: x, y: y), anchor: anchor)
+    }
+
+    /// Secondary captions are left out when they would have to grow a lot to be legible (small drawing on a
+    /// non-Retina screen): enlarged, they would collide with the controls around them.
+    func skipOptional(_ size: CGFloat) -> Bool { minText > size * 2 }
+
+    /// Text at `size`, raised to the legible minimum, and cut with "…" when wider than `maxWidth`
+    /// (the room a control's label has before it runs into the next control).
+    func fitted(_ s: String, _ size: CGFloat, _ c: Color? = nil, weight: Font.Weight = .regular,
+                mono: Bool = false, maxWidth: CGFloat? = nil) -> GraphicsContext.ResolvedText {
+        func make(_ str: String, _ sz: CGFloat) -> GraphicsContext.ResolvedText {
+            ctx.resolve(Text(str).font(.system(size: sz, weight: weight, design: mono ? .monospaced : .default))
+                .foregroundColor(c ?? st.ink))
+        }
+        let eff = max(size, minText)
+        let big = CGSize(width: 10_000, height: 1_000)
+        guard eff > size || maxWidth != nil else { return make(s, size) }
+        guard let limit = maxWidth else { return make(s, eff) }
+        var r = make(s, eff)
+        var keep = s.count
+        while r.measure(in: big).width > limit && keep > 1 {
+            keep -= 1
+            r = make(String(s.prefix(keep)).trimmingCharacters(in: .whitespaces) + "…", eff)
+        }
+        return r
     }
     func hline(_ x0: CGFloat, _ x1: CGFloat, _ y: CGFloat, _ c: Color? = nil, _ w: CGFloat? = nil) {
         var p = Path(); p.move(to: CGPoint(x: x0, y: y)); p.addLine(to: CGPoint(x: x1, y: y)); stroke(p, c, w ?? hair)
     }
     func vline(_ x: CGFloat, _ y0: CGFloat, _ y1: CGFloat, _ c: Color? = nil, _ w: CGFloat? = nil) {
         var p = Path(); p.move(to: CGPoint(x: x, y: y0)); p.addLine(to: CGPoint(x: x, y: y1)); stroke(p, c, w ?? hair)
+    }
+    /// Horizontal room for a label centred on control `hw`: the distance to its nearest neighbour in the same row.
+    func room(_ hw: HWControl) -> CGFloat {
+        let r = hw.rect
+        let d = Blueprint.controls.filter { $0.id != hw.id && $0.kind != .keys && $0.kind != .block && abs($0.rect.midY - r.midY) < 6 }
+            .map { abs($0.rect.midX - r.midX) }.min() ?? 60
+        return min(max(d - 1.5, r.width), 60)
     }
     func short(_ s: String, _ n: Int) -> String { s.count > n ? String(s.prefix(n - 1)) + "…" : s }
 
@@ -651,11 +693,14 @@ private struct BlueprintPainter {
         vline(30.5, 561, 563.5, st.faint); vline(247.5, 561, 563.5, st.faint)
         for i in 0..<16 { text("\(i + 1)", 39 + CGFloat(i) * 12.9, 567.5, 3.4, st.faint) }
         // User-parameter shortcuts over the top octave
-        text("USER PARAMETERS", 740, 560, 3.6, st.faint, weight: .semibold)
+        text("USER PARAMETERS", 740, 560, 3.6, st.faint, weight: .semibold, optional: true)
         hline(661, 818, 563.5, st.faint)
         let shortcuts: [(String, CGFloat)] = [("Global", 664), ("Store", 690), ("Velo Curve", 705), ("Name", 719), ("Mode", 732),
                                               ("Option", 747), ("MIDI Ch", 761), ("CC", 772), ("Min LSB", 787), ("Max MSB", 807)]
-        for (t, x) in shortcuts { text(t, x, 567.5, 3.0, st.faint) }
+        for (i, (t, x)) in shortcuts.enumerated() {
+            let gaps = [i > 0 ? x - shortcuts[i - 1].1 : 30, i < shortcuts.count - 1 ? shortcuts[i + 1].1 - x : 30]
+            text(t, x, 567.5, 3.0, st.faint, maxWidth: gaps.min()! - 1, optional: true)
+        }
         if let s = info.split, (21...108).contains(s) {
             let white = (21..<s).filter { !isBlack($0) }.count
             let sx = x0 + CGFloat(white) * w - (isBlack(s) ? w * 0.29 : 0)
@@ -669,18 +714,18 @@ private struct BlueprintPainter {
         let padModes: [(String, CGFloat)] = [("Pad", 469.5), ("Chord Memory", 495), ("Chord Transp.", 521)]
         for (t, y) in padModes {
             stroke(Path(ellipseIn: Blueprint.c(113.5, y, 3.5)), st.ink, line)
-            text(t, 113.5, y + 7.5, 3.0, st.faint)
+            text(t, 113.5, y + 7.5, 3.0, st.faint, maxWidth: 34, optional: true)
         }
         vline(125.6, 459, 536, st.faint); hline(125.6, 129, 459, st.faint); hline(125.6, 129, 536, st.faint)
         stroke(rect(Blueprint.r(105, 542, 119.5, 548.2)), st.faint, hair)
-        text("MIDI Ch", 112.3, 552.5, 3.4, st.faint)
-        text("Reset", 68, 556.5, 3.2, st.faint)
+        text("MIDI Ch", 112.3, 552.5, 3.4, st.faint, optional: true)
+        text("Reset", 68, 556.5, 3.2, st.faint, optional: true)
         hline(55, 63, 556.5, st.faint); hline(73, 81, 556.5, st.faint)
         // DAW section headings and transport
         text("DAW COMMANDS / USER", 322, 456.5, 3.6, st.faint, weight: .semibold)
         hline(268, 376.5, 459.7, st.faint)
-        text("TRACK CONTROLS", 322, 468.8, 3.2, st.faint)
-        text("GLOBAL CONTROLS", 322, 495.3, 3.2, st.faint)
+        text("TRACK CONTROLS", 322, 468.8, 3.2, st.faint, optional: true)
+        text("GLOBAL CONTROLS", 322, 495.3, 3.2, st.faint, optional: true)
         text("TRANSPORTS", 322, 528.8, 3.4, st.faint, weight: .semibold)
         hline(268, 376.5, 532.3, st.faint)
         for (i, t) in ["◀◀", "▶▶", "■", "❙❙▶", "●", "⟲"].enumerated() {
@@ -698,11 +743,12 @@ private struct BlueprintPainter {
         fill(rect(lcd, 1), st.ink.opacity(0.08))
         stroke(rect(lcd, 1), st.ink, line)
         stroke(rect(lcd.insetBy(dx: -1.5, dy: -1.5), 1.5), st.faint, hair)
-        text(info.slot, 416.5, 470.5, 4.6, st.ink, anchor: .leading, mono: true)
+        // The slot line only fits above the name while text needs little enlarging.
+        if minText < 6 { text(info.slot, 416.5, 470.5, 4.6, st.ink, anchor: .leading, mono: true) }
         text(short(info.presetName, 16), 416.5, 477.3, 5.2, st.data, weight: .bold, anchor: .leading, mono: true)
         for (t, x0) in [("Category", CGFloat(403.4)), ("Preset", 472.8)] {
             stroke(rect(Blueprint.r(x0, 499, x0 + 13.2, 504.7)), st.faint, hair)
-            text(t, x0 + 6.6, 501.9, 2.6, st.faint)
+            text(t, x0 + 6.6, 501.9, 2.6, st.faint, maxWidth: 22, optional: true)
         }
         for (t, x0) in [("←", CGFloat(410)), ("→", 465)] {
             stroke(rect(Blueprint.r(x0, 522.5, x0 + 13.3, 528)), st.faint, hair)
@@ -717,16 +763,16 @@ private struct BlueprintPainter {
             let on = t == "USER"
             if on { fill(rect(r), st.ink.opacity(0.15)) }
             stroke(rect(r), on ? st.ink : st.faint, on ? line : hair)
-            text(t, x0 + 12.9, 545.4, 2.8, on ? st.ink : st.faint, weight: .semibold)
+            text(t, x0 + 12.9, 545.4, 2.8, on ? st.ink : st.faint, weight: .semibold, maxWidth: 27, optional: true)
         }
         text("ARTURIA", 444.7, 563.5, 6.5, st.ink, weight: .medium)
         // Part / Live labels
-        text("Part 1", 530, 462.8, 3.2, st.faint); text("Next", 530, 476.5, 3.2, st.faint)
-        text("Part 2", 530, 488.6, 3.2, st.faint); text("Previous", 530, 502.3, 3.2, st.faint)
-        text("Live", 530, 514.3, 3.2, st.faint); text("Bank \(bank)", 530, 528, 3.8, st.data, weight: .bold)
+        text("Part 1", 530, 462.8, 3.2, st.faint, maxWidth: 26, optional: true); text("Next", 530, 476.5, 3.2, st.faint, maxWidth: 26, optional: true)
+        text("Part 2", 530, 488.6, 3.2, st.faint, maxWidth: 26, optional: true); text("Previous", 530, 502.3, 3.2, st.faint, maxWidth: 26, optional: true)
+        text("Live", 530, 514.3, 3.2, st.faint, maxWidth: 26, optional: true); text("Bank \(bank)", 530, 528, 3.8, st.data, weight: .bold)
         // Grouping rules under the encoder labels (1-4, 5-8)
         hline(549, 646, 478.4, st.faint); hline(659, 757, 478.4, st.faint)
-        text("BANK \(bank)", 546, 449, 4, st.faint, weight: .bold, anchor: .trailing)
+        text("BANK \(bank)", 546, 449, 4, st.faint, weight: .bold, anchor: .trailing, optional: true)
     }
 
     func paintControl(_ hw: HWControl) {
@@ -742,15 +788,15 @@ private struct BlueprintPainter {
             if let led = a.led { fill(rect(r, 2), led.opacity(0.30)) }
             stroke(rect(r, 2), a.led ?? st.ink, a.led == nil ? line : 1.2)
             stroke(rect(r.insetBy(dx: 1.6, dy: 1.6), 1.2), st.faint, hair)
-            text("\((hw.column ?? 0) + 1)", r.minX + 2.6, r.maxY - 2.4, 2.8, st.faint, anchor: .bottomLeading)
-            text(a.value, r.midX, r.midY - 0.5, 6, st.data, weight: .bold)
+            text("\((hw.column ?? 0) + 1)", r.minX + 2.6, r.maxY - 2.4, 2.8, st.faint, anchor: .bottomLeading, optional: true)
+            text(a.value, r.midX, r.midY - 0.5, 6, st.data, weight: .bold, maxWidth: r.width - 1)
         case .knob:
             stroke(Path(ellipseIn: r.insetBy(dx: -1.2, dy: -1.2)), st.faint, hair)
             fill(Path(ellipseIn: r), st.ink.opacity(0.10))
             stroke(Path(ellipseIn: r), st.ink, line)
             vline(r.midX, r.minY + 1, r.minY + 4.5, st.ink, line)
-            text(a.value, r.midX, 474.6, 4.4, st.data, weight: .bold)
-            text(short(a.name, 10), r.midX, 450, 3.2, st.faint)
+            text(a.value, r.midX, 474.6, 4.4, st.data, weight: .bold, maxWidth: room(hw))
+            text(a.name, r.midX, 450, 3.2, st.faint, maxWidth: room(hw), optional: true)
         case .fader:
             let slot = Blueprint.r(r.midX - 0.9, 482, r.midX + 0.9, 526)
             fill(rect(slot, 0.9), st.ink.opacity(0.35))
@@ -758,23 +804,23 @@ private struct BlueprintPainter {
             fill(rect(cap, 1), st.paper)
             stroke(rect(cap, 1), st.ink, line)
             hline(cap.minX, cap.maxX, cap.midY, st.ink, hair)
-            text(a.value, r.midX, 535, 4.6, st.data, weight: .bold)
-            if !a.name.isEmpty {
+            text(a.value, r.midX, 535, 4.6, st.data, weight: .bold, maxWidth: room(hw))
+            if !a.name.isEmpty && !skipOptional(3.2) {
                 var c = ctx
                 c.translateBy(x: r.midX + 4.4, y: 500)
                 c.rotate(by: .degrees(-90))
-                c.draw(Text(short(a.name, 14)).font(.system(size: 3.2)).foregroundColor(st.faint), at: .zero, anchor: .center)
+                c.draw(fitted(short(a.name, 14), 3.2, st.faint, maxWidth: 40), at: .zero, anchor: .center)
             }
         case .button:
             if let led = a.led { fill(rect(r, 1), led.opacity(0.55)) }
             stroke(rect(r, 1), st.ink, line)
             if hw.group == "columns" {
-                text(a.value, r.midX, 553, 4.2, st.data, weight: .bold)
+                text(a.value, r.midX, 553, 4.2, st.data, weight: .bold, maxWidth: room(hw))
             } else if hw.group == "daw" {
-                text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.2, st.faint)
-                text(a.value, r.midX, r.maxY + 8.2, 4.2, st.data, weight: .bold)
+                text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.2, st.faint, maxWidth: room(hw), optional: true)
+                text(a.value, r.midX, r.maxY + 8.2, 4.2, st.data, weight: .bold, maxWidth: room(hw))
             } else {
-                text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.4, st.faint)
+                text(hw.label ?? "", r.midX, r.maxY + 3.6, 3.4, st.faint, maxWidth: room(hw))
             }
         case .round:
             stroke(Path(ellipseIn: r), st.ink, line)
@@ -789,8 +835,8 @@ private struct BlueprintPainter {
                 ridges.move(to: CGPoint(x: r.minX + 2, y: y)); ridges.addLine(to: CGPoint(x: r.maxX - 2, y: y))
             }
             stroke(ridges, st.faint, 0.3)
-            text(hw.label ?? "", r.midX, 503.5, 3.6, st.faint)
-            text(a.value, r.midX, 509, 4.4, st.data, weight: .bold)
+            text(hw.label ?? "", r.midX, 503.5, 3.6, st.faint, maxWidth: room(hw), optional: true)
+            text(a.value, r.midX, 509, 4.4, st.data, weight: .bold, maxWidth: room(hw))
         case .keys, .block, .jack:
             break
         }
@@ -869,8 +915,8 @@ private struct BlueprintPainter {
             if inGroup { fill(rect(r.insetBy(dx: -4, dy: -4), 3), st.select.opacity(0.10)) }
             stroke(Path(ellipseIn: r.insetBy(dx: -1.4, dy: -1.4)), st.ink, line)
             fill(Path(ellipseIn: r.insetBy(dx: r.width * 0.25, dy: r.width * 0.25)), st.ink.opacity(0.6))
-            text(hw.label ?? "", r.midX, r.minY - 5, 3.4, st.faint)
-            text(short(a.value, 12), r.midX, r.maxY + 6.5, 4.2, st.data, weight: .bold)
+            text(hw.label ?? "", r.midX, r.minY - 5, 3.4, st.faint, maxWidth: room(hw))
+            text(a.value, r.midX, r.maxY + 6.5, 4.2, st.data, weight: .bold, maxWidth: room(hw))
             if hw.id == sel.element { stroke(rect(r.insetBy(dx: -4.5, dy: -4.5), 3), st.select, 1.2) }
             if a.changed { fill(Path(ellipseIn: Blueprint.c(r.maxX + 2, r.minY - 2, 1.7)), BP.changed) }
         }

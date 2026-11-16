@@ -16,12 +16,14 @@ enum RenderCheck {
             model.loaded[.user(user)] = b.presets[String(user)]
             model.edited[.user(user)] = b.presets[String(user)]
             let sel = PanelSelection(group: env["KLM_GROUP"] ?? "columns", column: 2, element: env["KLM_ELEMENT"] ?? "enc2")
+            let pxScale = CGFloat(Double(env["KLM_PXSCALE"] ?? "2") ?? 2)   // 1 = non-Retina display
             for (name, scheme) in [("dark", ColorScheme.dark)] {
                 let view = BlueprintCanvas(target: .user(user), selection: .constant(sel), bank: .constant(1),
                                            scale: CGFloat(Double(env["KLM_SCALE"] ?? "1.5") ?? 1.5),
                                            viewport: Blueprint.viewport(env["KLM_ZOOM"] ?? "whole"))
                     .environment(model)
                     .environment(\.colorScheme, scheme)
+                    .environment(\.displayScale, pxScale)
                 if let g = env["KLM_GRID"] {
                     let grid = GroupGrid(target: .user(user), group: PanelGroup.named(g), bank: 1, selection: .constant(sel), scrolls: false)
                         .environment(model).environment(\.colorScheme, scheme)
@@ -33,7 +35,7 @@ enum RenderCheck {
                     }
                 }
                 let r = ImageRenderer(content: view)
-                r.scale = 2
+                r.scale = pxScale
                 guard let img = r.nsImage, let tiff = img.tiffRepresentation,
                       let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:]) else { continue }
                 try png.write(to: URL(fileURLWithPath: "\(out)-\(name).png"))
