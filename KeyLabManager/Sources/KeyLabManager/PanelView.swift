@@ -801,8 +801,9 @@ private struct BlueprintPainter {
         }
         text("ARTURIA", 444.7, 563.5, 6.5, st.ink, weight: .medium)
         // Part / Live labels
-        text("Part 1", 530, 462.8, 3.2, st.faint, maxWidth: 26, optional: true); text("Next", 530, 476.5, 3.2, st.faint, maxWidth: 26, optional: true)
-        text("Part 2", 530, 488.6, 3.2, st.faint, maxWidth: 26, optional: true); text("Previous", 530, 502.3, 3.2, st.faint, maxWidth: 26, optional: true)
+        // Part titles under their buttons (like "Bank n" under Live); the browse function above.
+        text("Next", 530, 462.8, 3.2, st.faint, maxWidth: 26, optional: true); text("Part 1", 530, 476.5, 3.2, st.faint, maxWidth: 26)
+        text("Previous", 530, 488.6, 3.2, st.faint, maxWidth: 26, optional: true); text("Part 2", 530, 502.3, 3.2, st.faint, maxWidth: 26)
         text("Live", 530, 514.3, 3.2, st.faint, maxWidth: 26, optional: true); text("Bank \(bank)", 530, 528, 3.8, st.data, weight: .bold)
         // Grouping rules under the encoder labels (1-4, 5-8)
         hline(549, 646, 478.4, st.faint); hline(659, 757, 478.4, st.faint)
