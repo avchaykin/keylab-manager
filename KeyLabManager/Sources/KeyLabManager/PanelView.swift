@@ -89,7 +89,9 @@ extension AppModel {
         if let n = v("userPreset") { return "User \(n + 1)" }
         if let n = v("cc") { return "CC \(n)" }
         if visibleParam("rpnNRPNMSB", in: item, target: t) != nil { return "NRPN" }
-        if let m = item.params.first(where: { $0.options?.isEmpty == false }), let val = value(m, in: t),
+        if item.key == "pitchMod.pitchBend" { return "Bend" }
+        // The part a control plays on is a setting, not what it sends: keep it out of the value slot.
+        if let m = item.params.first(where: { $0.options?.isEmpty == false && $0.key != "channel" }), let val = value(m, in: t),
            let label = m.options?.first(where: { $0.value == val })?.label { return label }
         return ""
     }
