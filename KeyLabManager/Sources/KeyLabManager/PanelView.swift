@@ -330,13 +330,13 @@ struct HWControl {
 
 enum Blueprint {
     /// Canvas: x 0…1200, y 340…730 — rear panel strip (340…414) above the top view (414…730).
-    static let origin = CGPoint(x: 0, y: 340)
-    static let size = CGSize(width: 1200, height: 390)
+    static let origin = CGPoint(x: 0, y: 364)
+    static let size = CGSize(width: 1200, height: 366)
     /// Visible part of the canvas for each zoom.
     static func viewport(_ zoom: String) -> CGRect {
-        zoom == "whole" ? CGRect(origin: origin, size: size) : r(0, 340, 845, 600)
+        zoom == "whole" ? CGRect(origin: origin, size: size) : r(0, 364, 845, 588)
     }
-    static let rearY: CGFloat = 386
+    static let rearY: CGFloat = 392
 
     static let padX: [CGFloat] = [136.4, 166.9, 197.4, 227.4]
     static let padY: [CGFloat] = [456.9, 481.7, 506.6, 531.9]
@@ -917,10 +917,13 @@ private struct BlueprintPainter {
     }
 
     func paintRearShell() {
-        text("REAR PANEL", 8, 738, 5.5, st.faint, weight: .bold, anchor: .leading)
-        text("connectors as seen from behind (manual p. 7) · position along the case not to scale", 64, 738, 4.2, st.faint, anchor: .leading)
+        // Title on the connector row, left of the blocks.
+        text("REAR PANEL", 8, 765, 5.5, st.faint, weight: .bold, anchor: .leading)
+        if minText < 6.5 {   // the two lines are 6.5 apart
+            text("connectors as seen from behind (manual p. 7)", 8, 774, 4.2, st.faint, anchor: .leading, maxWidth: 240)
+            text("position along the case not to scale", 8, 780.5, 4.2, st.faint, anchor: .leading, maxWidth: 240)
+        }
         let y: CGFloat = 772
-        stroke(rect(Blueprint.r(250, 748, 776, 798), 2), st.ink, line)
         stroke(rect(Blueprint.r(256, 754, 370, 794), 1), st.faint, hair)          // CV outs
         stroke(rect(Blueprint.r(388, 754, 450, 794), 1), st.faint, hair)          // MIDI
         for (t, x) in [("MIDI In", CGFloat(403)), ("MIDI Out", 435)] {
