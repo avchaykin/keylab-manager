@@ -4,3 +4,6 @@
 .swiftpm/
 dist/
 __pycache__/
+backups/
+dump.json
+dump.py
